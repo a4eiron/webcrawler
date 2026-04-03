@@ -1,4 +1,4 @@
-module webscraper
+module github.com/a4eiron/webscraper
 
 go 1.26.1
 

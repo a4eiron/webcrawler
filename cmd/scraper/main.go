@@ -2,7 +2,8 @@ package main
 
 import (
 	"log"
-	. "webscraper/internal/parser"
+
+	. "github.com/a4eiron/webscraper/internal/parser"
 )
 
 func main() {
