@@ -1,15 +1,19 @@
 package main
 
 import (
+	"fmt"
 	"log"
 
-	. "github.com/a4eiron/webscraper/internal/parser"
+	"github.com/a4eiron/webscraper/internal/scraper"
 )
 
 func main() {
 
-	if err := Parse("https://rust-lang.org"); err != nil {
+	links, err := scraper.ExtractLinks("https://go.dev")
+	if err != nil {
 		log.Fatal(err)
 	}
+
+	fmt.Println(links)
 
 }
