@@ -48,19 +48,18 @@ func ExtractLinks(rawURL string) ([]string, error) {
 
 func fetchAndParse(rawUrl string) (*html.Node, error) {
 
-	client := &http.Client{Timeout: 10000 * time.Millisecond}
+	client := &http.Client{Timeout: 10 * time.Second}
 
 	res, err := client.Get(rawUrl)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
 
 	ct := res.Header.Get("Content-Type")
 	if !strings.Contains(ct, "text/html") {
 		return nil, fmt.Errorf("non-html content: %s", ct)
 	}
-
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status error: %s", res.Status)

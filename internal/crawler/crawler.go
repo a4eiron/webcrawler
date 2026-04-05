@@ -1,6 +1,7 @@
 package crawler
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/url"
@@ -18,6 +19,8 @@ type Crawler struct {
 	rlCap       int
 	rlRate      float64
 	ratelimiter *TokenBucketRLimiter
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
 type Option func(*Crawler)
@@ -41,6 +44,7 @@ func WithRLRate(r float64) Option {
 }
 
 func NewCrawler(opts ...Option) *Crawler {
+	ctx, cancel := context.WithCancel(context.Background())
 	c := &Crawler{
 		maxWorkers: 5,
 		maxDepth:   10,
@@ -48,6 +52,8 @@ func NewCrawler(opts ...Option) *Crawler {
 		visited:    map[string]bool{},
 		rlCap:      100,
 		rlRate:     20,
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 
 	for _, opt := range opts {
@@ -60,26 +66,52 @@ func NewCrawler(opts ...Option) *Crawler {
 }
 
 func (c *Crawler) Seed(URL string) {
-	c.wg.Add(1)
+	c.mu.Lock()
 	c.visited[URL] = true
-	c.jobs <- Job{Url: URL, Depth: 0}
-	c.Process()
+	c.mu.Unlock()
+
+	c.wg.Add(1)
+
+	select {
+	case c.jobs <- Job{Url: URL, Depth: 0}:
+		c.Start()
+	case <-c.ctx.Done():
+		c.wg.Wait()
+		close(c.jobs)
+	}
+
 }
 
-func (c *Crawler) Process() {
+func (c *Crawler) Start() {
+	defer c.wg.Done()
 	for range c.maxWorkers {
-		go func() {
-			for job := range c.jobs {
-				c.process(job)
-			}
-		}()
+		go c.worker()
 	}
-	c.wg.Wait()
-	close(c.jobs)
+}
+
+func (c *Crawler) worker() {
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case job, ok := <-c.jobs:
+			if !ok {
+				return
+			}
+			c.process(job)
+		}
+	}
+
 }
 
 func (c *Crawler) process(job Job) {
-	defer c.wg.Done()
+
+	select {
+	case <-c.ctx.Done():
+		return
+	default:
+	}
+
 	fmt.Println(job.Url, job.Depth)
 
 	links, err := ExtractLinks(job.Url)
@@ -94,22 +126,52 @@ func (c *Crawler) process(job Job) {
 	for _, link := range links {
 
 		c.mu.Lock()
+		v := c.visited[link]
+		c.mu.Unlock()
+
+		if v {
+			continue
+		}
+
+		c.mu.Lock()
 		if c.visited[link] {
 			c.mu.Unlock()
 			continue
 		}
-
 		c.visited[link] = true
-		c.wg.Add(1)
 		c.mu.Unlock()
-		go func(URL string, depth int) {
 
-			parsedURL, _ := url.Parse(URL)
-			if !c.ratelimiter.Allow(parsedURL.Hostname()) {
-				// log.Println("not allowed", parsedURL.Hostname())
-				time.Sleep(500 * time.Millisecond)
-			}
-			c.jobs <- Job{Url: URL, Depth: depth}
-		}(link, job.Depth+1)
+		c.wg.Add(1)
+		go c.submitJob(link, job.Depth+1)
 	}
+}
+
+func (c *Crawler) submitJob(link string, depth int) {
+	defer c.wg.Done()
+
+	parsedURL, err := url.Parse(link)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	for !c.ratelimiter.Allowed(parsedURL.Hostname()) {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	select {
+	case c.jobs <- Job{Url: link, Depth: depth}:
+		return
+	case <-c.ctx.Done():
+		return
+	}
+
+}
+
+func (c *Crawler) Stop() {
+	c.cancel()
 }

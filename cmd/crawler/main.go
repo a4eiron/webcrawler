@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	. "github.com/a4eiron/webcrawler/internal/crawler"
 )
@@ -23,7 +25,15 @@ func main() {
 	}
 
 	c := NewCrawler(WithMaxWorkers(*workers), WithMaxDepth(*depth), WithRLCap(10), WithRLRate(2))
+	go func() {
+		c.Seed(*seedURL)
+	}()
 
-	c.Seed(*seedURL)
+	done := make(chan os.Signal, 1)
+	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
+
+	<-done
+	fmt.Println("shutting down...")
+	c.Stop()
 
 }

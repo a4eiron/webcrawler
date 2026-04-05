@@ -69,7 +69,7 @@ func (rl *TokenBucketRLimiter) cleanup(ctx context.Context) {
 	}
 }
 
-func (rl *TokenBucketRLimiter) Allow(ip string) bool {
+func (rl *TokenBucketRLimiter) Allowed(ip string) bool {
 
 	val, ok := rl.buckets.Load(ip)
 	if !ok {
