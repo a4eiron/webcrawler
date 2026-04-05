@@ -1,10 +1,11 @@
-package scraper
+package crawler
 
 import (
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"golang.org/x/net/html"
 )
@@ -47,14 +48,22 @@ func ExtractLinks(rawURL string) ([]string, error) {
 
 func fetchAndParse(rawUrl string) (*html.Node, error) {
 
-	res, err := http.Get(rawUrl)
+	client := &http.Client{Timeout: 10000 * time.Millisecond}
+
+	res, err := client.Get(rawUrl)
+
+	ct := res.Header.Get("Content-Type")
+	if !strings.Contains(ct, "text/html") {
+		return nil, fmt.Errorf("non-html content: %s", ct)
+	}
+
 	if err != nil {
 		return nil, err
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status code error: %d %s", res.StatusCode, res.Status)
+		return nil, fmt.Errorf("status error: %s", res.Status)
 	}
 
 	doc, err := html.Parse(res.Body)
@@ -84,6 +93,8 @@ func resolveURL(base *url.URL, href string) (string, bool) {
 	if resolved.Host != base.Host {
 		return "", false
 	}
+	resolved.Fragment = ""
+	resolved.Scheme = "https"
 
 	return strings.TrimSuffix(resolved.String(), "/"), true
 }
