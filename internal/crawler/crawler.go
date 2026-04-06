@@ -7,22 +7,28 @@ import (
 	"net/url"
 	"sync"
 	"time"
+
+	"github.com/a4eiron/webcrawler/internal/extractor"
+	"github.com/a4eiron/webcrawler/internal/frontier"
 )
 
 type Crawler struct {
-	jobs        chan Job
-	visited     map[string]bool
-	mu          sync.Mutex
-	wg          sync.WaitGroup // tracks jobs
-	workerWg    sync.WaitGroup // tracks workers
-	maxWorkers  int
-	maxDepth    int
-	rlCap       int
-	rlRate      float64
-	ratelimiter *TokenBucketRLimiter
-	robotsCache *RobotsCache
-	ctx         context.Context
-	cancel      context.CancelFunc
+	jobs chan Job
+	// visited     map[string]bool
+	// mu          sync.Mutex
+
+	rdb           *frontier.Store
+	linkextractor *extractor.LinkExtractor
+	wg            sync.WaitGroup // tracks jobs
+	workerWg      sync.WaitGroup // tracks workers
+	maxWorkers    int
+	maxDepth      int
+	rlCap         int
+	rlRate        float64
+	ratelimiter   *TokenBucketRLimiter
+	robotsCache   *RobotsCache
+	ctx           context.Context
+	cancel        context.CancelFunc
 }
 
 type Option func(*Crawler)
@@ -45,17 +51,19 @@ func WithRLRate(r float64) Option {
 	return func(s *Crawler) { s.rlRate = r }
 }
 
-func NewCrawler(opts ...Option) *Crawler {
+func New(opts ...Option) *Crawler {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Crawler{
 		maxWorkers: 5,
 		maxDepth:   10,
 		jobs:       make(chan Job, 100),
-		visited:    map[string]bool{},
-		rlCap:      100,
-		rlRate:     20,
-		ctx:        ctx,
-		cancel:     cancel,
+		// visited:    map[string]bool{},
+		rdb:           frontier.New(),
+		linkextractor: extractor.New(),
+		rlCap:         100,
+		rlRate:        20,
+		ctx:           ctx,
+		cancel:        cancel,
 	}
 
 	for _, opt := range opts {
@@ -71,9 +79,11 @@ func NewCrawler(opts ...Option) *Crawler {
 func (c *Crawler) Seed(URL string) <-chan struct{} {
 
 	done := make(chan struct{})
-	c.mu.Lock()
-	c.visited[URL] = true
-	c.mu.Unlock()
+	// c.mu.Lock()
+	// c.visited[URL] = true
+	// c.mu.Unlock()
+
+	c.rdb.CheckAndMarkVisited(c.ctx, URL)
 
 	c.Start()
 
@@ -134,7 +144,7 @@ func (c *Crawler) process(job Job) {
 
 	fmt.Println(job.Url, job.Depth)
 
-	links, err := ExtractLinks(job.Url)
+	links, err := c.linkextractor.ExtractLinks(job.Url)
 	if err != nil {
 		log.Println(err)
 	}
@@ -144,13 +154,21 @@ func (c *Crawler) process(job Job) {
 	}
 
 	for _, link := range links {
-		c.mu.Lock()
-		if c.visited[link] {
-			c.mu.Unlock()
+		// c.mu.Lock()
+		// if c.visited[link] {
+		// 	c.mu.Unlock()
+		// 	continue
+		// }
+		// c.visited[link] = true
+		// c.mu.Unlock()
+
+		visited, err := c.rdb.CheckAndMarkVisited(c.ctx, link)
+		if visited {
+			if err != nil {
+				log.Println(err)
+			}
 			continue
 		}
-		c.visited[link] = true
-		c.mu.Unlock()
 
 		c.wg.Add(1)
 		go c.submitJob(link, job.Depth+1)

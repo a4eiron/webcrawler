@@ -1,4 +1,4 @@
-package crawler
+package extractor
 
 import (
 	"fmt"
@@ -10,14 +10,22 @@ import (
 	"golang.org/x/net/html"
 )
 
-func ExtractLinks(rawURL string) ([]string, error) {
+type contentParser struct {
+	client *http.Client
+}
+
+type LinkExtractor struct {
+	cparser *contentParser
+}
+
+func (e *LinkExtractor) ExtractLinks(rawURL string) ([]string, error) {
 
 	base, _ := url.Parse(rawURL)
 
 	visited := map[string]bool{}
 	var links []string
 
-	doc, err := fetchAndParse(rawURL)
+	doc, err := e.cparser.fetchAndParse(rawURL)
 	if err != nil {
 		return nil, err
 	}
@@ -46,11 +54,9 @@ func ExtractLinks(rawURL string) ([]string, error) {
 	return links, nil
 }
 
-func fetchAndParse(rawUrl string) (*html.Node, error) {
+func (cparser *contentParser) fetchAndParse(rawUrl string) (*html.Node, error) {
 
-	client := &http.Client{Timeout: 10 * time.Second}
-
-	res, err := client.Get(rawUrl)
+	res, err := cparser.client.Get(rawUrl)
 	if err != nil {
 		return nil, err
 	}
@@ -96,4 +102,12 @@ func resolveURL(base *url.URL, href string) (string, bool) {
 	resolved.Scheme = "https"
 
 	return strings.TrimSuffix(resolved.String(), "/"), true
+}
+
+func New() *LinkExtractor {
+	return &LinkExtractor{
+		cparser: &contentParser{
+			client: &http.Client{Timeout: 10 * time.Second},
+		},
+	}
 }

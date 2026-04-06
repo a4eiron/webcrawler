@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"syscall"
 
-	. "github.com/a4eiron/webcrawler/internal/crawler"
+	"github.com/a4eiron/webcrawler/internal/crawler"
 )
 
 func main() {
@@ -27,7 +27,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	c := NewCrawler(WithMaxWorkers(*workers), WithMaxDepth(*depth), WithRLCap(10), WithRLRate(2))
+	c := crawler.New(
+		crawler.WithMaxWorkers(*workers),
+		crawler.WithMaxDepth(*depth),
+		crawler.WithRLCap(10),
+		crawler.WithRLRate(2),
+	)
 
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
