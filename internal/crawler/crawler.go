@@ -13,12 +13,14 @@ type Crawler struct {
 	jobs        chan Job
 	visited     map[string]bool
 	mu          sync.Mutex
-	wg          sync.WaitGroup
+	wg          sync.WaitGroup // tracks jobs
+	workerWg    sync.WaitGroup // tracks workers
 	maxWorkers  int
 	maxDepth    int
 	rlCap       int
 	rlRate      float64
 	ratelimiter *TokenBucketRLimiter
+	robotsCache *RobotsCache
 	ctx         context.Context
 	cancel      context.CancelFunc
 }
@@ -61,31 +63,39 @@ func NewCrawler(opts ...Option) *Crawler {
 	}
 
 	c.ratelimiter = NewTokentBucketRLimiter(c.rlCap, c.rlRate)
+	c.robotsCache = NewRobotsCache()
 
 	return c
 }
 
-func (c *Crawler) Seed(URL string) {
+func (c *Crawler) Seed(URL string) <-chan struct{} {
+
+	done := make(chan struct{})
 	c.mu.Lock()
 	c.visited[URL] = true
 	c.mu.Unlock()
 
-	c.wg.Add(1)
+	c.Start()
 
-	select {
-	case c.jobs <- Job{Url: URL, Depth: 0}:
-		c.Start()
-	case <-c.ctx.Done():
+	c.wg.Add(1)
+	c.jobs <- Job{Url: URL, Depth: 0}
+
+	go func() {
 		c.wg.Wait()
 		close(c.jobs)
-	}
+		c.cancel()
+		c.workerWg.Wait()
+		close(done)
+	}()
 
+	return done
 }
 
 func (c *Crawler) Start() {
-	defer c.wg.Done()
 	for range c.maxWorkers {
-		go c.worker()
+		c.workerWg.Go(func() {
+			c.worker()
+		})
 	}
 }
 
@@ -105,11 +115,21 @@ func (c *Crawler) worker() {
 }
 
 func (c *Crawler) process(job Job) {
+	defer c.wg.Done()
 
 	select {
 	case <-c.ctx.Done():
 		return
 	default:
+	}
+
+	url, err := url.Parse(job.Url)
+	if err != nil {
+		return
+	}
+
+	if !c.robotsCache.Allowed(c.ctx, url.Hostname(), url.Path) {
+		return
 	}
 
 	fmt.Println(job.Url, job.Depth)
@@ -124,15 +144,6 @@ func (c *Crawler) process(job Job) {
 	}
 
 	for _, link := range links {
-
-		c.mu.Lock()
-		v := c.visited[link]
-		c.mu.Unlock()
-
-		if v {
-			continue
-		}
-
 		c.mu.Lock()
 		if c.visited[link] {
 			c.mu.Unlock()
@@ -147,17 +158,18 @@ func (c *Crawler) process(job Job) {
 }
 
 func (c *Crawler) submitJob(link string, depth int) {
-	defer c.wg.Done()
 
 	parsedURL, err := url.Parse(link)
 	if err != nil {
 		log.Println(err)
+		c.wg.Done()
 		return
 	}
 
 	for !c.ratelimiter.Allowed(parsedURL.Hostname()) {
 		select {
 		case <-c.ctx.Done():
+			c.wg.Done()
 			return
 		case <-time.After(100 * time.Millisecond):
 		}
@@ -167,6 +179,7 @@ func (c *Crawler) submitJob(link string, depth int) {
 	case c.jobs <- Job{Url: link, Depth: depth}:
 		return
 	case <-c.ctx.Done():
+		c.wg.Done()
 		return
 	}
 

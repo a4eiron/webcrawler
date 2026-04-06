@@ -3,8 +3,11 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 
 	. "github.com/a4eiron/webcrawler/internal/crawler"
@@ -25,15 +28,18 @@ func main() {
 	}
 
 	c := NewCrawler(WithMaxWorkers(*workers), WithMaxDepth(*depth), WithRLCap(10), WithRLRate(2))
-	go func() {
-		c.Seed(*seedURL)
-	}()
 
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
 
-	<-done
-	fmt.Println("shutting down...")
-	c.Stop()
+	crawlDone := c.Seed(*seedURL)
+
+	select {
+	case <-crawlDone:
+		log.Println("Crawl complete", runtime.NumGoroutine())
+	case <-done:
+		c.Stop()
+
+	}
 
 }
