@@ -8,16 +8,21 @@ import (
 	"sync"
 	"time"
 
+	"github.com/a4eiron/webcrawler/internal/cache"
 	"github.com/a4eiron/webcrawler/internal/extractor"
 	"github.com/a4eiron/webcrawler/internal/frontier"
 	. "github.com/a4eiron/webcrawler/internal/job"
+	"github.com/redis/go-redis/v9"
 )
 
 type Crawler struct {
+	rClient *redis.Client
+
 	rdb           *frontier.Store
 	linkextractor *extractor.LinkExtractor
 	ratelimiter   *TokenBucketRLimiter
-	robotsCache   *RobotsCache
+	dnsCache      *cache.DNSCache
+	robotsCache   *cache.RobotsCache
 
 	maxWorkers int
 	maxDepth   int
@@ -53,22 +58,24 @@ func New(opts ...Option) *Crawler {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	c := &Crawler{
-		maxWorkers:    5,
-		maxDepth:      10,
-		rlCap:         100,
-		rlRate:        20.0,
-		ctx:           ctx,
-		cancel:        cancel,
-		linkextractor: extractor.New(),
+		maxWorkers: 5,
+		maxDepth:   10,
+		rlCap:      100,
+		rlRate:     20.0,
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 
 	for _, opt := range opts {
 		opt(c)
 	}
 
-	c.rdb = frontier.New()
+	c.rClient = redis.NewClient(&redis.Options{Addr: "localhost:6379"})
 	c.ratelimiter = NewTokentBucketRLimiter(c.rlCap, c.rlRate)
-	c.robotsCache = NewRobotsCache()
+	c.rdb = frontier.New(c.rClient)
+	c.dnsCache = cache.NewDNSCache(c.rClient)
+	c.robotsCache = cache.NewRobotsCache(c.dnsCache.DialContext)
+	c.linkextractor = extractor.New(c.dnsCache.DialContext)
 
 	return c
 }

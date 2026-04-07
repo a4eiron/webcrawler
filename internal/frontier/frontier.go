@@ -44,11 +44,10 @@ func (s *Store) Seen(ctx context.Context, url string) (bool, error) {
 	return visited == int64(0), err
 }
 
-func New() *Store {
-	client := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+func New(rClient *redis.Client) *Store {
 
 	return &Store{
-		client:     client,
+		client:     rClient,
 		queueKey:   "crawler:queue",
 		visitedKey: "crawler:visited",
 	}

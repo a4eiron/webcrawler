@@ -45,7 +45,5 @@ func main() {
 	case <-done:
 		log.Println("Crawl complete", runtime.NumGoroutine())
 		c.Stop()
-
 	}
-
 }

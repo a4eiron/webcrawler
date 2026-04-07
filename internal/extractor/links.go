@@ -1,7 +1,9 @@
 package extractor
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -104,10 +106,14 @@ func resolveURL(base *url.URL, href string) (string, bool) {
 	return strings.TrimSuffix(resolved.String(), "/"), true
 }
 
-func New() *LinkExtractor {
+func New(dial func(ctx context.Context, network, addr string) (net.Conn, error)) *LinkExtractor {
 	return &LinkExtractor{
 		cparser: &contentParser{
-			client: &http.Client{Timeout: 10 * time.Second},
+			client: &http.Client{
+				Timeout: 10 * time.Second,
+				Transport: &http.Transport{
+					DialContext: dial,
+				}},
 		},
 	}
 }
