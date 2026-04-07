@@ -1,4 +1,4 @@
-package crawler
+package job
 
 type Job struct {
 	Url   string

@@ -10,25 +10,25 @@ import (
 
 	"github.com/a4eiron/webcrawler/internal/extractor"
 	"github.com/a4eiron/webcrawler/internal/frontier"
+	. "github.com/a4eiron/webcrawler/internal/job"
 )
 
 type Crawler struct {
-	jobs chan Job
-	// visited     map[string]bool
-	// mu          sync.Mutex
-
 	rdb           *frontier.Store
 	linkextractor *extractor.LinkExtractor
-	wg            sync.WaitGroup // tracks jobs
-	workerWg      sync.WaitGroup // tracks workers
-	maxWorkers    int
-	maxDepth      int
-	rlCap         int
-	rlRate        float64
 	ratelimiter   *TokenBucketRLimiter
 	robotsCache   *RobotsCache
-	ctx           context.Context
-	cancel        context.CancelFunc
+
+	maxWorkers int
+	maxDepth   int
+	rlCap      int
+	rlRate     float64
+
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	wg       sync.WaitGroup
+	workerWg sync.WaitGroup
 }
 
 type Option func(*Crawler)
@@ -42,9 +42,7 @@ func WithMaxDepth(d int) Option {
 }
 
 func WithRLCap(c int) Option {
-	return func(s *Crawler) {
-		s.rlCap = c
-	}
+	return func(s *Crawler) { s.rlCap = c }
 }
 
 func WithRLRate(r float64) Option {
@@ -53,46 +51,43 @@ func WithRLRate(r float64) Option {
 
 func New(opts ...Option) *Crawler {
 	ctx, cancel := context.WithCancel(context.Background())
+
 	c := &Crawler{
-		maxWorkers: 5,
-		maxDepth:   10,
-		jobs:       make(chan Job, 100),
-		// visited:    map[string]bool{},
-		rdb:           frontier.New(),
-		linkextractor: extractor.New(),
+		maxWorkers:    5,
+		maxDepth:      10,
 		rlCap:         100,
-		rlRate:        20,
+		rlRate:        20.0,
 		ctx:           ctx,
 		cancel:        cancel,
+		linkextractor: extractor.New(),
 	}
 
 	for _, opt := range opts {
 		opt(c)
 	}
 
+	c.rdb = frontier.New()
 	c.ratelimiter = NewTokentBucketRLimiter(c.rlCap, c.rlRate)
 	c.robotsCache = NewRobotsCache()
 
 	return c
 }
 
-func (c *Crawler) Seed(URL string) <-chan struct{} {
-
+func (c *Crawler) Seed(seedURL string) <-chan struct{} {
 	done := make(chan struct{})
-	// c.mu.Lock()
-	// c.visited[URL] = true
-	// c.mu.Unlock()
 
-	c.rdb.CheckAndMarkVisited(c.ctx, URL)
+	if visited, _ := c.rdb.Seen(c.ctx, seedURL); visited {
+		close(done)
+		return done
+	}
+
+	c.rdb.Push(c.ctx, Job{Url: seedURL, Depth: 0})
+	c.wg.Add(1)
 
 	c.Start()
 
-	c.wg.Add(1)
-	c.jobs <- Job{Url: URL, Depth: 0}
-
 	go func() {
 		c.wg.Wait()
-		close(c.jobs)
 		c.cancel()
 		c.workerWg.Wait()
 		close(done)
@@ -103,25 +98,32 @@ func (c *Crawler) Seed(URL string) <-chan struct{} {
 
 func (c *Crawler) Start() {
 	for range c.maxWorkers {
-		c.workerWg.Go(func() {
-			c.worker()
-		})
+		c.workerWg.Add(1)
+		go c.worker()
 	}
 }
 
 func (c *Crawler) worker() {
+	defer c.workerWg.Done()
+
 	for {
 		select {
 		case <-c.ctx.Done():
 			return
-		case job, ok := <-c.jobs:
-			if !ok {
+		default:
+		}
+
+		job, err := c.rdb.Pop(c.ctx)
+		if err != nil {
+			// log.Println(err)
+			if c.ctx.Err() != nil {
 				return
 			}
-			c.process(job)
+			continue
 		}
-	}
 
+		c.process(job)
+	}
 }
 
 func (c *Crawler) process(job Job) {
@@ -133,20 +135,22 @@ func (c *Crawler) process(job Job) {
 	default:
 	}
 
-	url, err := url.Parse(job.Url)
+	u, err := url.Parse(job.Url)
 	if err != nil {
+		log.Printf("invalid URL %s: %v", job.Url, err)
 		return
 	}
 
-	if !c.robotsCache.Allowed(c.ctx, url.Hostname(), url.Path) {
+	if !c.robotsCache.Allowed(c.ctx, u.Hostname(), u.Path) {
 		return
 	}
 
-	fmt.Println(job.Url, job.Depth)
+	fmt.Printf("[Crawl] %s (depth: %d)\n", job.Url, job.Depth)
 
 	links, err := c.linkextractor.ExtractLinks(job.Url)
 	if err != nil {
-		log.Println(err)
+		log.Printf("failed to extract links from %s: %v", job.Url, err)
+		return
 	}
 
 	if job.Depth >= c.maxDepth {
@@ -154,37 +158,29 @@ func (c *Crawler) process(job Job) {
 	}
 
 	for _, link := range links {
-		// c.mu.Lock()
-		// if c.visited[link] {
-		// 	c.mu.Unlock()
-		// 	continue
-		// }
-		// c.visited[link] = true
-		// c.mu.Unlock()
+		if link == "" {
+			continue
+		}
 
-		visited, err := c.rdb.CheckAndMarkVisited(c.ctx, link)
-		if visited {
-			if err != nil {
-				log.Println(err)
-			}
+		if visited, err := c.rdb.Seen(c.ctx, link); visited || err != nil {
 			continue
 		}
 
 		c.wg.Add(1)
-		go c.submitJob(link, job.Depth+1)
+		c.enqueue(link, job.Depth+1)
 	}
 }
 
-func (c *Crawler) submitJob(link string, depth int) {
+func (c *Crawler) enqueue(link string, depth int) {
 
-	parsedURL, err := url.Parse(link)
+	parsed, err := url.Parse(link)
 	if err != nil {
-		log.Println(err)
+		log.Printf("invalid link %s: %v", link, err)
 		c.wg.Done()
 		return
 	}
 
-	for !c.ratelimiter.Allowed(parsedURL.Hostname()) {
+	for !c.ratelimiter.Allowed(parsed.Hostname()) {
 		select {
 		case <-c.ctx.Done():
 			c.wg.Done()
@@ -193,14 +189,11 @@ func (c *Crawler) submitJob(link string, depth int) {
 		}
 	}
 
-	select {
-	case c.jobs <- Job{Url: link, Depth: depth}:
-		return
-	case <-c.ctx.Done():
+	if c.ctx.Err() != nil {
 		c.wg.Done()
 		return
 	}
-
+	c.rdb.Push(c.ctx, Job{Url: link, Depth: depth})
 }
 
 func (c *Crawler) Stop() {
