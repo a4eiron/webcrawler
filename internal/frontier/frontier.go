@@ -3,7 +3,6 @@ package frontier
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"time"
 
 	. "github.com/a4eiron/webcrawler/internal/job"
@@ -16,13 +15,28 @@ type Store struct {
 	visitedKey string
 }
 
-func (s *Store) Push(ctx context.Context, job Job) {
-	encodedJob, err := json.Marshal(job)
+var pushIfNotSeenScript = redis.NewScript(`
+local visited = redis.call("SADD", KEYS[1], ARGV[1])
+if visited == 1 then
+	redis.call("LPUSH", KEYS[2], ARGV[2])
+	return 1
+end
+return 0
+`)
+
+func (s *Store) PushIfNotSeen(ctx context.Context, job Job) (bool, error) {
+	encoded, err := json.Marshal(job)
 	if err != nil {
-		log.Println(err)
-		return
+		return false, err
 	}
-	s.client.LPush(ctx, s.queueKey, string(encodedJob))
+
+	res, err := pushIfNotSeenScript.Run(ctx, s.client, []string{s.visitedKey, s.queueKey}, job.Url, string(encoded)).Int()
+	if err != nil {
+		return false, err
+	}
+
+	return res == 1, nil
+
 }
 
 func (s *Store) Pop(ctx context.Context) (Job, error) {
@@ -37,11 +51,6 @@ func (s *Store) Pop(ctx context.Context) (Job, error) {
 	err = json.Unmarshal([]byte(job[1]), &decodedJob)
 
 	return decodedJob, err
-}
-
-func (s *Store) Seen(ctx context.Context, url string) (bool, error) {
-	visited, err := s.client.SAdd(ctx, s.visitedKey, url).Result()
-	return visited == int64(0), err
 }
 
 func New(rClient *redis.Client) *Store {

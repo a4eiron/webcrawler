@@ -92,6 +92,11 @@ func getAttribute(node *html.Node, key string) (string, bool) {
 }
 
 func resolveURL(base *url.URL, href string) (string, bool) {
+
+	if strings.HasPrefix(href, "mailto:") || strings.HasPrefix(href, "javascript:") {
+		return "", false
+	}
+
 	u, err := url.Parse(href)
 	if err != nil {
 		return "", false
@@ -101,7 +106,6 @@ func resolveURL(base *url.URL, href string) (string, bool) {
 		return "", false
 	}
 	resolved.Fragment = ""
-	resolved.Scheme = "https"
 
 	return strings.TrimSuffix(resolved.String(), "/"), true
 }

@@ -12,12 +12,10 @@ import (
 	"github.com/a4eiron/webcrawler/internal/extractor"
 	"github.com/a4eiron/webcrawler/internal/frontier"
 	. "github.com/a4eiron/webcrawler/internal/job"
-	"github.com/redis/go-redis/v9"
+	"github.com/a4eiron/webcrawler/internal/urlnorm"
 )
 
 type Crawler struct {
-	rClient *redis.Client
-
 	rdb           *frontier.Store
 	linkextractor *extractor.LinkExtractor
 	ratelimiter   *TokenBucketRLimiter
@@ -70,10 +68,11 @@ func New(opts ...Option) *Crawler {
 		opt(c)
 	}
 
-	c.rClient = redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+	rClient := cache.RedisClient(c.ctx)
+
 	c.ratelimiter = NewTokentBucketRLimiter(c.rlCap, c.rlRate)
-	c.rdb = frontier.New(c.rClient)
-	c.dnsCache = cache.NewDNSCache(c.rClient)
+	c.rdb = frontier.New(rClient)
+	c.dnsCache = cache.NewDNSCache(rClient)
 	c.robotsCache = cache.NewRobotsCache(c.dnsCache.DialContext)
 	c.linkextractor = extractor.New(c.dnsCache.DialContext)
 
@@ -83,12 +82,12 @@ func New(opts ...Option) *Crawler {
 func (c *Crawler) Seed(seedURL string) <-chan struct{} {
 	done := make(chan struct{})
 
-	if visited, _ := c.rdb.Seen(c.ctx, seedURL); visited {
+	ok, err := c.rdb.PushIfNotSeen(c.ctx, Job{Url: seedURL, Depth: 0})
+	if !ok || err != nil {
 		close(done)
 		return done
 	}
 
-	c.rdb.Push(c.ctx, Job{Url: seedURL, Depth: 0})
 	c.wg.Add(1)
 
 	c.Start()
@@ -148,6 +147,14 @@ func (c *Crawler) process(job Job) {
 		return
 	}
 
+	for !c.ratelimiter.Allowed(u.Hostname()) {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
 	if !c.robotsCache.Allowed(c.ctx, u.Hostname(), u.Path) {
 		return
 	}
@@ -169,38 +176,21 @@ func (c *Crawler) process(job Job) {
 			continue
 		}
 
-		if visited, err := c.rdb.Seen(c.ctx, link); visited || err != nil {
+		link, err = urlnorm.Normalize(link)
+		if err != nil {
 			continue
 		}
 
-		c.wg.Add(1)
-		c.enqueue(link, job.Depth+1)
-	}
-}
-
-func (c *Crawler) enqueue(link string, depth int) {
-
-	parsed, err := url.Parse(link)
-	if err != nil {
-		log.Printf("invalid link %s: %v", link, err)
-		c.wg.Done()
-		return
-	}
-
-	for !c.ratelimiter.Allowed(parsed.Hostname()) {
-		select {
-		case <-c.ctx.Done():
-			c.wg.Done()
-			return
-		case <-time.After(100 * time.Millisecond):
+		ok, err := c.rdb.PushIfNotSeen(c.ctx, Job{Url: link, Depth: job.Depth + 1})
+		if err != nil {
+			log.Println(err)
+			continue
 		}
+		if !ok {
+			continue
+		}
+		c.wg.Add(1)
 	}
-
-	if c.ctx.Err() != nil {
-		c.wg.Done()
-		return
-	}
-	c.rdb.Push(c.ctx, Job{Url: link, Depth: depth})
 }
 
 func (c *Crawler) Stop() {
